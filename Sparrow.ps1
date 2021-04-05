@@ -1,21 +1,14 @@
-[cmdletbinding()]Param(
-    [Parameter()]
-    [string] $AzureEnvironment,
-    [Parameter()]
-    [string] $ExchangeEnvironment,
-    [Parameter()]
-    [datetime] $StartDate = [DateTime]::UtcNow.AddDays(-364),
-    [Parameter()]
-    [datetime] $EndDate = [DateTime]::UtcNow,
-    [Parameter()]
-    [string] $ExportDir = (Join-Path ([Environment]::GetFolderPath("Desktop")) 'ExportDir'),
-    [Parameter()]
-    [string] $InvestigationExportParentDir = (Join-Path ([Environment]::GetFolderPath("Desktop")) 'ExportDir\AppInvestigations'),
-    [Parameter()]
-    [switch] $NoO365 = $false,
-    [Parameter()]
-    [string] $Delimiter = "," # Change this delimiter for localization support of CSV import into Excel
-)
+$days = -182 # = 6 months back
+$location = Get-Location
+
+$AzureEnvironment = "AzureCloud"
+$ExchangeEnvironment = "O365Default"
+$StartDate = [DateTime]::UtcNow.AddDays($days)
+$EndDate = [DateTime]::UtcNow
+$ExportDir = $location.Path + '\ExportDir'
+$InvestigationExportParentDir = $location.Path + '\ExportDir\AppInvestigations'
+$NoO365 = $false
+$Delimiter = "," # Change this delimiter for localization support of CSV import into Excel
 
 Function Import-PSModules{
 
@@ -24,26 +17,20 @@ Function Import-PSModules{
         [string] $ExportDir
         )
 
-    $ModuleArray = @("ExchangeOnlineManagement","AzureAD","MSOnline")
-
-    ForEach ($ReqModule in $ModuleArray){
-        If ($null -eq (Get-Module $ReqModule -ListAvailable -ErrorAction SilentlyContinue)){
-            Write-Verbose "Required module, $ReqModule, is not installed on the system."
-            Write-Verbose "Installing $ReqModule from default repository"
-            Install-Module -Name $ReqModule -Force
-            Write-Verbose "Importing $ReqModule"
-            Import-Module -Name $ReqModule
-        } ElseIf ($null -eq (Get-Module $ReqModule -ErrorAction SilentlyContinue)){
-            Write-Verbose "Importing $ReqModule"
-            Import-Module -Name $ReqModule
-        }
-    }
+    Import-Module -Name "ExchangeOnlineManagement" -Force
+    Import-Module -Name "MSOnline" -Force
+    Import-Module -Name "AzureAD" -Force
+    Import-Module -Name "Azure.Storage" -Force
+       
 
     #If you want to change the default export directory, please change the $ExportDir value.
     #Otherwise, the default export is the user's home directory, Desktop folder, and ExportDir folder.
     If (!(Test-Path $ExportDir)){
         New-Item -Path $ExportDir -ItemType "Directory" -Force
     }
+
+    $ExportDir = 
+    $InvestigationExportParentDir = '.\ExportDir\AppInvestigations'
 }
 
 Function Get-AzureEnvironments() {
@@ -56,73 +43,14 @@ Function Get-AzureEnvironments() {
         )
 
     $AzureEnvironments = [Microsoft.Open.Azure.AD.CommonLibrary.AzureEnvironment]::PublicEnvironments.Keys
-    While ($AzureEnvironments -cnotcontains $AzureEnvironment -or [string]::IsNullOrWhiteSpace($AzureEnvironment)) {
-        Write-Host 'Azure Environments'
-        Write-Host '------------------'
-        $AzureEnvironments | ForEach-Object { Write-Host $_ }
-        $AzureEnvironment = Read-Host 'Choose your Azure Environment [AzureCloud]'
-        If ([string]::IsNullOrWhiteSpace($AzureEnvironment)) { $AzureEnvironment = 'AzureCloud' }
-    }
 
     If ($NoO365 -eq $false) {
         $ExchangeEnvironments = [System.Enum]::GetNames([Microsoft.Exchange.Management.RestApiClient.ExchangeEnvironment])
-        While ($ExchangeEnvironments -cnotcontains $ExchangeEnvironment -or [string]::IsNullOrWhiteSpace($ExchangeEnvironment) -and $ExchangeEnvironment -ne "None") {
-            Write-Host 'Exchange Environments'
-            Write-Host '---------------------'
-            $ExchangeEnvironments | ForEach-Object { Write-Host $_ }
-            Write-Host 'None'
-            $ExchangeEnvironment = Read-Host 'Choose your Exchange Environment [O365Default]'
-            If ([string]::IsNullOrWhiteSpace($ExchangeEnvironment)) { $ExchangeEnvironment = 'O365Default' }
-        }
     } Else {
         $ExchangeEnvironment = "None"
     }
 
     Return ($AzureEnvironment, $ExchangeEnvironment)
-}
-
-Function New-ExcelFromCsv() {
-
-    [cmdletbinding()]Param(
-        [Parameter(Mandatory=$true)]
-        [string] $ExportDir
-        )
-
-    Try {
-        $Excel = New-Object -ComObject Excel.Application
-    }
-    Catch { 
-        Write-Host 'Warning; Excel not found - skipping combined file.' 
-        Return
-    }
-
-    #Open each file and move it in a single workbook
-    $Excel.DisplayAlerts = $False
-    $Workbook = $Excel.Workbooks.Add()
-    $Csvs = Get-ChildItem -Path "${ExportDir}\*.csv" -Force
-    $ToDeletes = $Workbook.Sheets | Select-Object -ExpandProperty Name
-    ForEach ($Csv in $Csvs) {
-        $TempWorkbook = $Excel.Workbooks.Open($Csv.FullName)
-        $TempWorkbook.Sheets[1].Copy($Workbook.Sheets[1], [Type]::Missing) | Out-Null
-        $Workbook.Sheets[1].UsedRange.Columns.AutoFit() | Out-Null
-        $Workbook.Sheets[1].Name = $Csv.BaseName -replace '_Operations_.*',''
-    }
-
-    #Save out the new file
-    ForEach ($ToDelete in $ToDeletes) { 
-        $Workbook.Activate()
-        $Workbook.Sheets[$ToDelete].Activate()
-        $Workbook.Sheets[$ToDelete].Delete()
-    }
-    $Workbook.Activate()
-    Try{
-        $Workbook.SaveAs((Join-Path $ExportDir 'Summary_Export.xlsx'))
-    } Catch{
-        Write-Warning "An error has occurred. No combined .xlsx will be produced."
-        Write-Warning "The csvs remain in the default export directory."
-    }
-    
-    $Excel.Quit()
 }
 
 Function Get-UALData {
@@ -144,12 +72,16 @@ Function Get-UALData {
         [string] $Delimiter
         )
 
-    $LicenseQuestion = Read-Host 'Do you have an Office 365/Microsoft 365 E5/G5 license? Y/N'
+    # $LicenseQuestion = Read-Host 'Do you have an Office 365/Microsoft 365 E5/G5 license? Y/N'
+    $LicenseQuestion = "Y"
     Switch ($LicenseQuestion){
         Y {$LicenseAnswer = "Yes"}
         N {$LicenseAnswer = "No"}
     }
-    $AppIdQuestion = Read-Host 'Would you like to investigate one application, all applications, or skip application investigation? One/All/Skip'
+    
+    #$AppIdQuestion = Read-Host 'Would you like to investigate one application, all applications, or skip application investigation? One/All/Skip'
+
+    $AppIdQuestion = "All"
     Switch ($AppIdQuestion){
         One {$AppIdInvestigation = "Single"}
         All {$AppIdInvestigation = "All"}
@@ -162,14 +94,14 @@ Function Get-UALData {
             New-Item -Path $InvestigationExportParentDir -ItemType "Directory" -Force
         }
     } ElseIf ($AppIdInvestigation -eq "All"){
-        Write-Host "Gathering Azure Application IDs..."
+        Write-Output "Gathering Azure Application IDs..."
         $AzureAppIds = Get-AzureADServicePrincipal -All $true | Where-Object {$_.ServicePrincipalType -eq "Application"}
-        Write-Host "Total number of Azure Application IDs: " $AzureAppIds.Count
+        Write-Output "Total number of Azure Application IDs: " $AzureAppIds.Count
         If (!(Test-Path $InvestigationExportParentDir)){
             New-Item -Path $InvestigationExportParentDir -ItemType "Directory" -Force
         }
     } Else{
-        Write-Host "Skipping application investigation."
+        Write-Output "Skipping application investigation."
     }
    
     #Searches for any modifications to the domain and federation settings on a tenant's domain
@@ -352,7 +284,7 @@ Function Get-UALData {
                 Write-Verbose "No MailItemsAccessed data returned for $($SusAppId) and no CSV will be produced."
             }            
         } Else{
-            Write-Host "MailItemsAccessed query will be skipped as it is not present without an E5/G5 license."
+            Write-Output "MailItemsAccessed query will be skipped as it is not present without an E5/G5 license."
         }
 
         #Searches for the AppID to see if it accessed SharePoint or OneDrive items
@@ -389,7 +321,7 @@ Function Get-UALData {
                 }
             }
         } Else{
-            Write-Host "MailItemsAccessed query will be skipped as it is not present without an E5/G5 license."
+            Write-Output "MailItemsAccessed query will be skipped as it is not present without an E5/G5 license."
         }
         ForEach ($AzureAppId in $AzureAppIds){
             #Determines if the AppInvestigation sub-directory by displayname path exists, and if not, creates that path
@@ -506,7 +438,7 @@ Function Export-UALData {
 
         If ($UALInput.Count -eq 5000)
         {
-            Write-Host 'Warning: Result set may have been truncated; narrow start/end date.'
+            Write-Output 'Warning: Result set may have been truncated; narrow start/end date.'
         }
 
         $DataArr = @()
@@ -654,19 +586,49 @@ Function Export-UALData {
         Remove-Variable DataArr -ErrorAction SilentlyContinue
 }
 
+# Script Execution
 
 #Function calls, if you do not need a particular check, you can comment it out below with #
-Import-PSModules -ExportDir $ExportDir -Verbose
+Import-PSModules -ExportDir $ExportDir -Verbose 
 ($AzureEnvironment, $ExchangeEnvironment) = Get-AzureEnvironments -AzureEnvironment $AzureEnvironment -ExchangeEnvironment $ExchangeEnvironment
+
+$cred = Get-AutomationPSCredential -Name 'Azure-App-Guard'
+Write-Output "Azure-App-Guard retrieved."
+
+$saCred = Get-AutomationPSCredential -Name 'Azure-App-Guard-Storage'
+# https://xxx.blob.core.windows.net/
+
+$storageAccountName = $saCred.UserName
+$accessKey = $saCred.GetNetworkCredential().Password
+#$accessKey
+
+Write-Output "Calling on CloudConnect to connect to the tenant's Exchange Online environment via PowerShell."
+
 #Calling on CloudConnect to connect to the tenant's Exchange Online environment via PowerShell
-Connect-ExchangeOnline -ExchangeEnvironmentName $ExchangeEnvironment
+Connect-ExchangeOnline -ExchangeEnvironmentName $ExchangeEnvironment -Credential $cred
+
+Write-Output "Connecting to MSOnline."
+
 #Connecting to MSOnline
-Connect-MsolService -AzureEnvironment $AzureEnvironment
+Connect-MsolService -AzureEnvironment $AzureEnvironment -Credential $cred
+
+Write-Output "Connecting to AzureAD."
 #Connect to your tenant's AzureAD environment
-Connect-AzureAD -AzureEnvironmentName $AzureEnvironment
+Connect-AzureAD -AzureEnvironmentName $AzureEnvironment -Credential $cred
+
+Write-Output "Getting UAL Data"
 If ($($ExchangeEnvironment -ne "None") -and $($NoO365 -eq $false)) {
     Get-UALData -ExportDir $ExportDir -InvestigationExportParentDir $InvestigationExportParentDir -StartDate $StartDate -EndDate $EndDate -ExchangeEnvironment $ExchangeEnvironment -AzureEnvironment $AzureEnvironment -Verbose -Delimiter $Delimiter
 }
 Get-AzureDomains  -AzureEnvironment $AzureEnvironment -ExportDir $ExportDir -Verbose -Delimiter $Delimiter
 Get-AzureSPAppRoles -AzureEnvironment $AzureEnvironment -ExportDir $ExportDir -Verbose -Delimiter $Delimiter
-New-ExcelFromCsv -ExportDir $ExportDir
+
+Write-Output "Process Completed. Copy to blob storage."
+
+#Map to the reports BLOB context
+$storageContext = New-AzureStorageContext -StorageAccountName $storageAccountName -StorageAccountKey $accessKey
+
+#Copy the file to the storage account
+Get-ChildItem -Path $ExportDir -File | Set-AzureStorageBlobContent -Container "azure-app-guard" -Context $storageContext -Verbose -Force
+
+Write-Output "Files Uploaded to blob."
